@@ -40,8 +40,8 @@ To change the defaults, you may save a configuration file to $HOME/.config/smsto
 
 And edit these settings for your needs.
 
-Known problems
---------------
+Known limitations
+-----------------
 
 * No support for "multi part" messages. The parts are received as separate messages!
 * Not all GSM characters supported
