@@ -1,0 +1,207 @@
+#!/usr/bin/python3
+# -*- coding: utf-8 -*-
+#
+#    smstool  Very simple "surfstick" SMS sending tool
+#    Copyright (C) 2018  Manuel Reimer <manuel.reimer@gmx.de>
+#
+#    This program is free software: you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation, either version 3 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License
+#    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+import sys
+import serial
+import csv
+import json
+from pathlib import Path
+from configparser import ConfigParser
+
+
+# Helper class which provides a very simple GSM charset encoder/decoder
+class GSMCharset:
+    def __init__(self) -> None:
+        self.gsmtable = [
+            ["@", "\x00"], #40
+            ["$", "\x02"], #24
+            ["_", "\x11"], #5F
+            ["ß", "\x1E"], #DF
+            ["Ä", "\x5B"], #C4
+            ["Ö", "\x5C"], #D6
+            ["Ü", "\x5E"], #DC
+            ["ä", "\x7B"], #E4
+            ["ö", "\x7C"], #F6
+            ["ü", "\x7E"], #FC
+            ["^", "\x1B\x14"], #5E
+            ["{", "\x1B\x28"], #7B
+            ["}", "\x1B\x29"], #7D
+            ["\\", "\x1B\x2F"], #5C
+            ["[", "\x1B\x3C"], #5B
+            ["~", "\x1B\x3D"], #7E
+            ["]", "\x1B\x3E"], #5D
+            ["|", "\x1B\x40"], #7C
+            ["€", "\x1B\x65"] #
+        ]
+
+    def Decode(self, data: bytes) -> str:
+        data = data.decode("ascii")
+        for pair in self.gsmtable:
+            data = data.replace(pair[1], pair[0])
+        return data
+
+    def Encode(self, data: str) -> bytes:
+        for pair in reversed(self.gsmtable):
+            data = data.replace(pair[0], pair[1])
+        return data.encode("ascii")
+
+
+# Primary SMSTOOL class
+class SMSTOOL:
+    def __init__(self) -> None:
+        self.modem = None
+        self.device = "/dev/ttyUSB0"
+        self.baudrate = 115200
+        self.gsmcharset = GSMCharset()
+
+    # Parses config file and overrides defaults with config file entries.
+    def ParseConfig(self) -> None:
+        configpath = Path.home().joinpath(".config/smstool.conf")
+        if not configpath.exists():
+            return
+
+        parser = ConfigParser()
+        parser.read_file(configpath.open())
+        if not "smstool" in parser:
+            return
+
+        config = parser["smstool"]
+        if "baudrate" in config:
+            self.baudrate = int(config["baudrate"])
+        if "device" in config:
+            self.device = config["device"]
+
+    # Waits for the modem to either confirm success or send an error message.
+    # Returns "True" on success and "False" on error.
+    def GetModemSuccess(self) -> bool:
+        # Modem will echo our sent command. Get this first.
+        self.modem.readline()
+
+        # Now read until we get one of our known status responses
+        while(1==1):
+            line = self.modem.readline()
+            if b"OK" in line:
+                return True
+            if b"ERROR" in line:
+                return False
+            if b"NO CARRIER" in line:
+                return False
+
+    # Initialize modem with our required settings
+    def SetupModem(self) -> None:
+        self.modem = serial.Serial()
+        self.modem.port = self.device
+        self.modem.baudrate = self.baudrate
+        self.modem.open()
+
+        # Reset modem
+        self.modem.write(b"ATZ\r")
+        if not self.GetModemSuccess():
+            raise Exception("Failed to reset modem!")
+
+        # Enter SMS text mode
+        self.modem.write(b"AT+CMGF=1\r")
+        if not self.GetModemSuccess():
+            raise Exception("Failed to switch to SMS text mode!")
+
+        # Enable additional information in result codes
+        self.modem.write(b"AT+CSDH=1\r")
+        if not self.GetModemSuccess():
+            raise Exception("Failed to enable additional info mode!")
+
+        # Set character set to GSM
+        self.modem.write(b"AT+CSCS=\"GSM\"\r")
+        if not self.GetModemSuccess():
+            raise Exception("Failed to set character set!")
+
+    # Reads all available SMS and returns a list of dict's with the messages
+    def ReadSMS(self) -> list:
+        smslist = []
+        self.modem.write(b"AT+CMGL=\"ALL\"\r")
+        while(1==1):
+            line=self.modem.readline();
+            if line.startswith(b"+CMGL: "):
+                header = list(csv.reader([line.decode("ascii")]))[0]
+                data = {
+                    "index": int(header[0].split(" ")[1]),
+                    "status": header[1],
+                    "address": header[2],
+                    "name": header[3],
+                    "timestamp": header[4],
+                    "addresstype": header[5]
+                }
+                length = int(header[6])
+                data["text"] = self.gsmcharset.Decode(self.modem.read(length))
+                smslist.append(data)
+            if line.startswith(b"OK"):
+                return smslist
+
+    # Deletes the provided SMS
+    def DeleteSMS(self, sms: dict) -> None:
+        strindex = str(sms["index"])
+        self.modem.write(b"AT+CMGD=" + strindex.encode("ascii") + b"\r")
+        if not self.GetModemSuccess():
+            raise Exception("Failed to delete SMS with index " + strindex + "!")
+
+    # Sends SMS
+    def SendSMS(self, number: str, message: str) -> None:
+        # Initiate sending
+        self.modem.write(b"AT+CMGS=\"" + number.encode("ascii") + b"\"\r")
+
+        # Send message
+        self.modem.write(self.gsmcharset.Encode(message))
+
+        # Send "Ctrl+Z" to end message content
+        self.modem.write(b"\x1A")
+
+        # Wait for the modem to confirm success
+        if not self.GetModemSuccess():
+            raise Exception("Failed to send SMS!")
+
+
+# Main routine
+if __name__ == '__main__':
+    # Initialize main class
+    smstool = SMSTOOL()
+    smstool.ParseConfig()
+    smstool.SetupModem()
+
+    # Check for command
+    if len(sys.argv) <= 1:
+        print("Please specify command! Valid commands are: read, fetch, send", file=sys.stderr)
+        exit(1)
+    command = sys.argv[1]
+
+    # For command "read" and "fetch" we print JSON formatted SMS list
+    if command == "read" or command == "fetch":
+        smslist = smstool.ReadSMS()
+        print(json.dumps(smslist, indent=2, ensure_ascii=False))
+        # "fetch" also deletes all messages
+        if (command == "fetch"):
+            for sms in smslist:
+                smstool.DeleteSMS(sms)
+    # Command "send" sends out a SMS
+    elif command == "send":
+        if len(sys.argv) != 4:
+            print("Invalid parameters! Syntax is: smstool send NUMBER MESSAGE", file=sys.stderr)
+            exit(1)
+        smstool.SendSMS(sys.argv[2], sys.argv[3])
+    # Invalid command given
+    else:
+        print("Invalid command given! Valid commands are: read, fetch, send", file=sys.stderr)
