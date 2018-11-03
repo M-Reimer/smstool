@@ -25,6 +25,11 @@ from pathlib import Path
 from configparser import ConfigParser
 
 
+# Prints error message to STDERR and exits with exit status 1
+def ExitWithError(msg: str) -> None:
+    print(msg, file=sys.stderr)
+    exit(1)
+
 # Helper class which provides a very simple GSM charset encoder/decoder
 class GSMCharset:
     def __init__(self) -> None:
@@ -113,22 +118,22 @@ class SMSTOOL:
         # Reset modem
         self.modem.write(b"ATZ\r")
         if not self.GetModemSuccess():
-            raise Exception("Failed to reset modem!")
+            ExitWithError("Failed to reset modem!")
 
         # Enter SMS text mode
         self.modem.write(b"AT+CMGF=1\r")
         if not self.GetModemSuccess():
-            raise Exception("Failed to switch to SMS text mode!")
+            ExitWithError("Failed to switch to SMS text mode!")
 
         # Enable additional information in result codes
         self.modem.write(b"AT+CSDH=1\r")
         if not self.GetModemSuccess():
-            raise Exception("Failed to enable additional info mode!")
+            ExitWithError("Failed to enable additional info mode!")
 
         # Set character set to GSM
         self.modem.write(b"AT+CSCS=\"GSM\"\r")
         if not self.GetModemSuccess():
-            raise Exception("Failed to set character set!")
+            ExitWithError("Failed to set character set!")
 
     # Reads all available SMS and returns a list of dict's with the messages
     def ReadSMS(self) -> list:
@@ -157,7 +162,7 @@ class SMSTOOL:
         strindex = str(sms["index"])
         self.modem.write(b"AT+CMGD=" + strindex.encode("ascii") + b"\r")
         if not self.GetModemSuccess():
-            raise Exception("Failed to delete SMS with index " + strindex + "!")
+            ExitWithError("Failed to delete SMS with index " + strindex + "!")
 
     # Sends SMS
     def SendSMS(self, number: str, message: str) -> None:
@@ -172,36 +177,34 @@ class SMSTOOL:
 
         # Wait for the modem to confirm success
         if not self.GetModemSuccess():
-            raise Exception("Failed to send SMS!")
+            ExitWithError("Failed to send SMS!")
 
 
 # Main routine
 if __name__ == '__main__':
+    # Check for command
+    if len(sys.argv) <= 1:
+        ExitWithError("Please specify command! Valid commands are: read, fetch, send")
+    command = sys.argv[1]
+
     # Initialize main class
     smstool = SMSTOOL()
     smstool.ParseConfig()
     smstool.SetupModem()
-
-    # Check for command
-    if len(sys.argv) <= 1:
-        print("Please specify command! Valid commands are: read, fetch, send", file=sys.stderr)
-        exit(1)
-    command = sys.argv[1]
 
     # For command "read" and "fetch" we print JSON formatted SMS list
     if command == "read" or command == "fetch":
         smslist = smstool.ReadSMS()
         print(json.dumps(smslist, indent=2, ensure_ascii=False))
         # "fetch" also deletes all messages
-        if (command == "fetch"):
+        if command == "fetch":
             for sms in smslist:
                 smstool.DeleteSMS(sms)
     # Command "send" sends out a SMS
     elif command == "send":
         if len(sys.argv) != 4:
-            print("Invalid parameters! Syntax is: smstool send NUMBER MESSAGE", file=sys.stderr)
-            exit(1)
+            ExitWithError("Invalid parameters! Syntax is: smstool send NUMBER MESSAGE")
         smstool.SendSMS(sys.argv[2], sys.argv[3])
     # Invalid command given
     else:
-        print("Invalid command given! Valid commands are: read, fetch, send", file=sys.stderr)
+        ExitWithError("Invalid command given! Valid commands are: read, fetch, send")
